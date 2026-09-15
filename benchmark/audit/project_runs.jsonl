@@ -1,0 +1,2 @@
+{"at": "2026-09-15T17:35:13+00:00", "debug_minutes": 15.0, "event": "debug", "note": "Diagnosed pytest startup crash: conda-resolved setuptools 75.1.0 vendors typeguard (pytest11 plugin) -> ImportError is_typeddict with pinned typing_extensions. Resolved by Amendment 004 R1.", "project": "luigi"}
+{"at": "2026-09-15T17:35:14+00:00", "debug_minutes": 10.0, "event": "debug", "note": "Same root cause as luigi, symptom AssertionError in Parser.addini under pytest 5.4.2. Resolved by Amendment 004 R1.", "project": "pandas"}
