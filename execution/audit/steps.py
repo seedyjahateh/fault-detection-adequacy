@@ -295,6 +295,8 @@ for r in $(seq 1 {runs}); do
   echo "$M DET_END $r $rc $s $e"
   if [ -f /tmp/fda_det/r$r.xml ]; then echo "$M DET_JUNIT_B64 $r $(gzip -c /tmp/fda_det/r$r.xml | base64 -w0)"; fi
   echo "$M DET_OUT_B64 $r $(gzip -c /tmp/fda_det/r$r.txt | base64 -w0)"
+  # A timeout already makes the bug non-deterministic (EXCLUSION_RULES §D); further runs cannot change that.
+  if [ "$rc" = 124 ] || [ "$rc" = 137 ]; then echo "$M DET_STOPPED_AFTER_TIMEOUT $r"; break; fi
 done
 """)
 

@@ -268,7 +268,8 @@ def determinism(ctx: dict, bug: dict, log: Logger) -> dict:
     outcome_maps = [mp for _, mp in maps]
     varying = sorted({t for mp in outcome_maps for t in mp if len({x.get(t) for x in outcome_maps}) > 1})
     complete = len(per_run) == config.DETERMINISM_RUNS and len(outcome_maps) == config.DETERMINISM_RUNS
-    any_timeout = any(p["timed_out"] for p in per_run)
+    any_timeout = any(p["timed_out"] for p in per_run) or steps.marked_value(r.output, m, "DET_STOPPED_AFTER_TIMEOUT") is not None
+    scope["stopped_after_timeout_run"] = steps.marked_value(r.output, m, "DET_STOPPED_AFTER_TIMEOUT")
     counts = [dict(Counter(mp.values())) for mp in outcome_maps]
     deterministic = complete and not any_timeout and bool(outcome_maps and outcome_maps[0]) and not varying
     return {"ran": True, **scope, "per_run": per_run, "outcome_counts": counts,
