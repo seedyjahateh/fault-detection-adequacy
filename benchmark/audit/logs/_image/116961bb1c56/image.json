@@ -1,0 +1,9 @@
+{
+  "tag": "fda-bugsinpy-audit:116961bb1c56",
+  "image_id": "sha256:ce6b7f77df0207e0a90e87714efa20bf8b4633f28a1d095a3e206d6fb0b98818",
+  "base_image": "continuumio/miniconda3:23.3.1-0@sha256:f3637fcc44fac7c20aebcc6fb8910cf76139ff2f4e6a7777d7643460bee50922",
+  "fork_sha": "316b95e2353ecda832bad9b42f86fa7c2fcec8ac",
+  "created": "2026-09-15T12:55:12.287715095Z",
+  "conda": "conda 23.3.1",
+  "ccache": "ccache version 4.2"
+}

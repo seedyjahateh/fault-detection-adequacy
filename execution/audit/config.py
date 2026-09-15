@@ -50,7 +50,9 @@ COMPILE_TIMEOUT_S = 120 * 60
 PROBE_TIMEOUT_S = 10 * 60
 
 PROJECT_WALLCLOCK_GUARD_S = 6 * 3600   # TIMEOUT_PROJECT guard (elapsed wall clock, all sessions)
-MIN_HOST_FREE_GB = 4.0
+# Checked before each bug starts. Raised from 4 GB after the 2026-09-15 pilot session: with 3 workers,
+# host memory pressure grew Windows' system-managed page file and C: fell from 17.7 to 2.3 GB in 10 min.
+MIN_HOST_FREE_GB = 10.0
 
 # Amendment 004. "r1" = primary procedure; "unmodified" = the fork's procedure exactly as written.
 PROCEDURES = ("r1", "unmodified")
