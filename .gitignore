@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+# Rebuildable build contexts, smoke-test outputs and scratch state
+.audit-cache/

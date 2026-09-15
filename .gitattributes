@@ -1,0 +1,6 @@
+# Keep LF everywhere: shell scripts run inside Linux containers and JSONL
+# records must be byte-stable across platforms.
+* text=auto eol=lf
+*.gz binary
+*.png binary
+*.pdf binary

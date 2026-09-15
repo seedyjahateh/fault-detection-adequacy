@@ -1,0 +1,16 @@
+[project]
+name = "fault-detection-adequacy"
+version = "0.1.0"
+description = "Fault-detection adequacy of LLM-generated test suites (research harness)"
+requires-python = "==3.11.14"
+# The Phase 1 audit harness is stdlib-only by design, so it has no runtime deps to pin.
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest==8.4.2"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["execution/audit/tests"]
