@@ -1,14 +1,14 @@
 # Phase 1 Classification and Exclusion Rules
 
-- **Version:** `exclusion-rules-v1` — **DRAFT v0, committed 2026-09-15, before any official audit data exists**
-- **Governing:** `docs/PROTOCOL.md` §4.1 and §5.2, `docs/AMENDMENTS.md` 001–003
+- **Version:** `exclusion-rules-v1` — **FINAL, approved by the PI 2026-09-15, before any official audit data exists**
+  (draft v0 committed earlier the same day in `424bf48`)
+- **Governing:** `docs/PROTOCOL.md` §4.1 and §5.2, `docs/AMENDMENTS.md` 001–005
 - **Implementation:** `execution/audit/parse.py` and `execution/audit/status.py` (§A); post-hoc classifier (§B–§D)
 
-Items marked **[PROPOSED]** are operationalisations the PI has not yet approved. This file is
-committed before the audit so that the timestamp precedes the data. After the PI rules on the
-[PROPOSED] items it is re-committed as final. It is then **frozen**: any later change needs PI
-approval and a new amendment. Every raw observation needed to recompute §A under an alternative
-reading is kept in `audit_results.jsonl`, so a ruling on §A items can be applied without re-running.
+This file is **frozen**: any change needs PI approval and a new amendment. Items that were
+proposals in draft v0 are marked *(approved, Amendment 005)*. Every raw observation needed to
+recompute §A under an alternative reading (e.g. the assertion-only sensitivity) is kept in
+`audit_results.jsonl`.
 
 ---
 
@@ -28,9 +28,17 @@ reading is kept in `audit_results.jsonl`, so a ruling on §A items can be applie
    - for pytest commands only: `-p no:cacheprovider --junitxml=<tmp>`.
 3. **Repetitions.** 3 consecutive runs per version (§4.1), all in the same environment after a single checkout and compile.
 4. **Isolation** (stricter than the fork, which shares one environment across all bugs with the same requirements):
-   - Every (bug, version) gets a fresh clone of a pristine base env: `python=<declared>` plus `pytest`, exactly as `bugsinpy-testall` creates it.
+   - Every (bug, version) gets a fresh clone of a pristine base env: `python=<declared>` plus `pytest`, exactly as `bugsinpy-testall` creates it (plus R1, item 5).
    - The project clone is `git clean -ffdx`'d before every checkout.
    - Editable VCS requirements (`-e git+...`) are cloned to `/work/pip-src` rather than inside the checkout.
+     In practice the fork passes `-e git+...` to pip as a single argument, which pip rejects, so the
+     editable install never happens and tests import the checkout (verified per bug by the import probe).
+5. **Environment workaround R1** (Amendment 004): base envs for Python 3.8.x add `setuptools==68.0.0`.
+   Each record carries `procedure: "r1"`. Records in `unmodified_sample/` carry `procedure: "unmodified"`.
+6. **Parallel execution** (Amendment 004): 2–3 workers per project, each with its own container
+   and clone; each record carries `parallel_workers`. A bug classified `FLAKY` or `TIMEOUT` with
+   `parallel_workers > 1` is re-audited once with 1 worker, and that serial record is the latest
+   attempt. The report gives counts before and after the serial confirmation.
 
 ### A.2 Command verdicts
 
@@ -65,7 +73,7 @@ When the automated rule cannot decide, the bug falls into a crash category (`UNR
 `UNKNOWN`). Leaning toward crash never inflates the eligible count. Such bugs may be manually
 reviewed, with each decision logged in `manual_decisions.jsonl`.
 
-### A.4 Strict set **[PROPOSED]**
+### A.4 Strict set *(approved, Amendment 005)*
 
 `STRICT = {ASSERTION, RUNTIME_EXCEPTION}`, read as §5.2 condition 3's "assertion failure or the
 documented exception".
@@ -89,14 +97,15 @@ documented exception".
 2. **`FLAKY`**: run verdicts are not identical across the 3 buggy runs, or across the 3 fixed runs.
 3. **`TIMEOUT`**: consistent `timeout` on either version.
 4. **`REPRODUCES`**: buggy runs are all `fail`, fixed runs are all `pass`, **and every buggy run contains ≥1 failure in STRICT**.
-   - **[PROPOSED]** "≥1 per run": for bugs with several triggering tests, one strict failure is enough, because that test alone can separate oracles.
+   - *(approved, Amendment 005)* "≥1 per run": for bugs with several triggering tests, one strict failure is enough, because that test alone can separate oracles.
    - Whether failure signatures match across runs is recorded (`failure_signature_consistent`), but does not affect the status.
 5. **`REPRODUCES_CRASH_ONLY`**: buggy all `fail` and fixed all `pass`, but some buggy run has no STRICT failure.
 6. **`FAILS_EXPECTED_BEHAVIOR`**: everything else. The reason is one of `buggy_passes`, `fixed_fails`, `inverted`, or `buggy_<v>_fixed_<v>`.
 
 **Broad reproduction** = `REPRODUCES` + `REPRODUCES_CRASH_ONLY`.
 
-**Project-level:** `TIMEOUT_PROJECT` when a project's cumulative audit wall clock reaches 6 h. The
+**Project-level:** `TIMEOUT_PROJECT` when a project's elapsed audit wall clock (summed across
+sessions) reaches 6 h. Workers finish the bugs already in progress, then take no new ones. The
 project is parked and its un-audited bugs are reported as *not audited*.
 
 ---
@@ -114,14 +123,14 @@ Computed from `bug_patch.txt`, the snapshots of the buggy and fixed sources, and
    - every added line, located in the fixed file's AST.
 
    A newly added function counts as touched.
-3. **Changes outside any function [PROPOSED]:**
+3. **Changes outside any function** *(approved, Amendment 005)*:
    - Import lines, blank lines, comments and docstring-only changes are ignored.
    - Any other module- or class-level change counts as **one** unit per file.
 4. **Rule:** `n_files ≤ 2 AND n_function_units ≤ 3`.
 
 ## §C Reachability and hermeticity (§4.1 criterion 3, Amendment 003)
 
-### C.1 Reachable from a public API **[PROPOSED]**
+### C.1 Reachable from a public API *(approved, Amendment 005)*
 
 `REACHABLE` iff both hold:
 - **(a)** the coverage run of the triggering test(s) on the buggy version executed ≥1 patched line of the buggy file. For pure insertions, this means the line immediately before the insertion. The run imports the checked-out code, as verified by the coverage file origin.
@@ -143,8 +152,8 @@ A bug is **excluded** if manual review confirms any of:
 
 | Flag | Automated trigger (static, on the scanned code) |
 |---|---|
-| `NETWORK` | Imports or calls of `requests`, `urllib`, `urllib2`, `urllib3`, `http.client`, `httplib`, `socket`, `httpx`, `aiohttp`, `websocket(s)`, `ftplib`, `smtplib`; network markers (`@pytest.mark.network`, `@tm.network`, `@network`, `@online`) |
-| `EXTERNAL_PATH` | File I/O (`open`, `io.open`, `os.*`/`shutil.*` file operations, `pathlib` read/write, `np.load`/`np.save`, `pd.read_*`/`to_*` with a path) whose path argument does not derive from `tmp_path`, `tmpdir`, `tmp_path_factory` or `tmpdir_factory` |
+| `NETWORK` | Imports or calls of `requests`, `urllib`, `urllib2`, `urllib3`, `http.client`, `httplib`, `socket`, `httpx`, `aiohttp`, `websocket(s)`, `ftplib`, `smtplib`; network markers (`@pytest.mark.network`, `@tm.network`, `@network`, `@online`). **Localhost-only sockets are included** (excluded as written); the report states how many bugs a localhost exception would add. |
+| `EXTERNAL_PATH` | **Writes**, or reads of files **not tracked in the repository at the buggy commit**, via file I/O (`open`, `io.open`, `os.*`/`shutil.*` file operations, `pathlib` read/write, `np.load`/`np.save`, `pd.read_*`/`to_*` with a path), whose path does not derive from an allowed temp location. **Allowed temp locations:** `tmp_path`, `tmpdir`, `tmp_path_factory`, `tmpdir_factory`, stdlib `tempfile.*`, and pandas `tm.ensure_clean()`. Reads of repository-tracked files (e.g. `tests/data/*.csv`) are allowed. |
 | `WALL_CLOCK_TZ` | `datetime.now/utcnow/today`, `date.today`, `time.time/localtime/gmtime/strftime` without an explicit time, `Timestamp.now/today`, reads of `TZ`/`tzlocal` |
 | `UNSEEDED_RANDOM` | `random.*`, `np.random.*`, `default_rng()`, `RandomState()`, `tm.makeDataFrame`-style random generators, with no seeding call (`seed(`, `RandomState(<int>)`, `default_rng(<int>)`) in the same scanned scope |
 | `SUBPROCESS` | `subprocess.*`, `os.system`, `os.popen`, `os.exec*`, `os.spawn*`, `pexpect`, `sh.` |
@@ -152,16 +161,10 @@ A bug is **excluded** if manual review confirms any of:
 Every automatically flagged bug gets a manual decision: `exclude` or `keep` (false positive), with a
 one-line reason, appended to `manual_decisions.jsonl`. Unflagged bugs pass without review.
 
-**Open questions for the PI [PROPOSED; must be resolved before the classifier runs]:**
-1. **stdlib `tempfile` directories and `tm.ensure_clean()`** (pandas, tempfile-based and cleaned up) are
-   hermetic, but not pytest-managed. A literal reading of Amendment 003 excludes them.
-   *Proposal:* treat them like `tmp_path` (allowed).
-2. **Read-only fixture files checked into the repository** (e.g. `tests/data/*.csv`) are "paths outside
-   pytest-managed temp dirs", but deterministic and version-controlled.
-   *Proposal:* allow **reads** of files tracked in the repository at the buggy commit; flag writes.
-3. **Localhost-only sockets** (tornado/sanic/scrapy test servers bound to 127.0.0.1) fall under `socket`
-   in Amendment 003 as written, which would exclude most of tornado (16 bugs) and sanic (5).
-   *Proposal:* apply the rule as written (exclude), and report how many bugs a localhost exception would add, as a sensitivity figure.
+**Resolved scope questions** *(approved, Amendment 005)*:
+1. stdlib `tempfile` directories and `tm.ensure_clean()` are **allowed**, like `tmp_path`.
+2. **Reads** of files tracked in the repository at the buggy commit are **allowed**; writes are flagged.
+3. Localhost-only sockets are **excluded** under `NETWORK` as written, with a sensitivity figure reported.
 
 ## §D Determinism (§4.1 criterion 4, Amendment 001)
 

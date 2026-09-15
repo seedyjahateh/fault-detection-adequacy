@@ -13,7 +13,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 from . import config, records
-from .audit import bug_ids
+from .audit import Paths, bug_ids, project_elapsed, project_seconds
 from .parse import short_type
 
 STATUSES = ["REPRODUCES", "REPRODUCES_CRASH_ONLY", "FAILS_SETUP", "FAILS_EXPECTED_BEHAVIOR", "FLAKY", "TIMEOUT"]
@@ -95,19 +95,34 @@ def build(audit_dir: Path, projects: list[str], title: str) -> str:
     # ---- by project
     base = fork_2023_baseline()
     L += ["## Status by project", "",
-          "| Project | Bugs | Audited | " + " | ".join(ABBR[s] for s in STATUSES) + " | Broad | Fork 2023 broad* | Wall clock | Debug min |",
-          "|---|---:|---:|" + "---:|" * len(STATUSES) + "---:|---:|---:|---:|"]
+          "| Project | Bugs | Audited | " + " | ".join(ABBR[s] for s in STATUSES)
+          + " | Broad | Fork 2023 broad* | Elapsed | Compute | Debug min |",
+          "|---|---:|---:|" + "---:|" * len(STATUSES) + "---:|---:|---:|---:|---:|"]
+    paths = Paths(audit_dir)
     for p in projects:
         pr = [r for r in recs if r["project"] == p]
         pc = Counter(r["status"] for r in pr)
-        secs = sum(e.get("seconds", 0) for e in events if e.get("project") == p and e.get("event") in ("bug_attempt", "project_prep"))
+        elapsed = project_elapsed(paths, p)
+        compute = project_seconds(paths, p)
         dbg = sum(e.get("debug_minutes", 0) for e in events if e.get("project") == p and e.get("event") == "debug")
         b23 = sum(1 for (bp, _), ok in base.items() if bp == p and ok)
         flag = " (TIMEOUT_PROJECT, parked)" if p in parked else ""
         L.append(f"| {p}{flag} | {total_bugs[p]} | {len(pr)} | " + " | ".join(str(pc[s]) for s in STATUSES)
-                 + f" | {pc['REPRODUCES'] + pc['REPRODUCES_CRASH_ONLY']} | {b23} | {secs/3600:.2f} h | {dbg:.0f} |")
+                 + f" | {pc['REPRODUCES'] + pc['REPRODUCES_CRASH_ONLY']} | {b23} | {elapsed/3600:.2f} h"
+                 + f" | {compute/3600:.2f} h | {dbg:.0f} |")
     L += ["", "\\* Fork's own 2023 run (`new-conda-*.csv`): single run, grep-based, crash failures counted as fail, "
-          "over **all** bugs of the project (not only those audited here).", ""]
+          "over **all** bugs of the project (not only those audited here). *Elapsed* is wall clock (the "
+          "TIMEOUT_PROJECT guard measure); *Compute* sums per-bug time across parallel workers.", ""]
+
+    # ---- serial confirmation (Amendment 004)
+    allrecs = [r for r in records.read_jsonl(audit_dir / "audit_results.jsonl") if r["project"] in projects]
+    parallel_ft = {(r["project"], r["bug_id"]) for r in allrecs
+                   if r["status"] in ("FLAKY", "TIMEOUT") and r.get("parallel_workers", 1) > 1}
+    if parallel_ft:
+        after = Counter(latest[k]["status"] for k in parallel_ft)
+        L += ["## Serial confirmation of FLAKY/TIMEOUT (Amendment 004)", "",
+              f"{len(parallel_ft)} bugs were FLAKY or TIMEOUT under parallel execution. Latest (serial) status: "
+              + ", ".join(f"{s}={n}" for s, n in after.most_common()) + ".", ""]
 
     # ---- failure causes
     L += ["## Most common failure causes", ""]
@@ -175,6 +190,21 @@ def build(audit_dir: Path, projects: list[str], title: str) -> str:
           "| Count (bug-versions) | pip error |", "|---:|---|"]
     L += [f"| {n} | `{e}` |" for e, n in pipf.most_common(10)]
     L.append("")
+
+    # ---- environment workaround and unmodified-procedure sample (Amendment 004)
+    r1_applied = sum(1 for r in recs if any((r["versions"].get(v) or {}).get("base_env_extra_specs") for v in ("buggy", "fixed")))
+    L += ["## Environment workaround R1 and unmodified-procedure sample (Amendment 004)", "",
+          f"R1 (`setuptools==68.0.0` in the base env for Python 3.8.x) was applied to {r1_applied} of {len(recs)} audited bugs.", ""]
+    srecs = records.latest_by_bug(records.read_jsonl(config.UNMODIFIED_SAMPLE_DIR / "audit_results.jsonl"))
+    if srecs:
+        L += ["| Project/bug | Unmodified procedure | R1 procedure |", "|---|---|---|"]
+        for (p, b), r in sorted(srecs.items()):
+            r1 = latest.get((p, b))
+            L.append(f"| {p}/{b} | {r['status']} ({r['status_reason']}) | {r1['status'] if r1 else 'not audited'} |")
+        sc = Counter(r["status"] for r in srecs.values())
+        L += ["", f"Unmodified sample: {len(srecs)} bugs — " + ", ".join(f"{s}={n}" for s, n in sc.most_common()) + ".", ""]
+    else:
+        L += ["Unmodified-procedure sample: not yet run.", ""]
 
     # ---- determinism
     det = [r for r in recs if r["status"] == "REPRODUCES"]

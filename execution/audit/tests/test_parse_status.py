@@ -177,6 +177,19 @@ def test_pytest_startup_crash_is_runner_error_not_assertion():
     assert s["status"] == "FAILS_SETUP" and s["reason"] == "buggy_runner_error"
 
 
+def test_rc4_after_collection_import_error_is_setup_failure():
+    """Regression (luigi/2 smoke): module import fails in collection, node id then 'not found' (rc 4)."""
+    p = parse.parse_patch(PATCH)
+    xml = ('<testsuite><testcase classname="" name="test.contrib.beam_dataflow_test">'
+           '<error message="collection failure">E   ModuleNotFoundError: No module named \'luigi\'</error>'
+           '</testcase></testsuite>')
+    v = status.command_verdict("pytest test/x.py::T::t", 4, 0.5, 1200, "ERROR: not found", xml, p, "luigi")
+    assert v["verdict"] == "fail" and v["failures"][0]["category"] == "IMPORT_ERROR"
+    run = {"verdict": "fail", "commands": [v]}
+    s = status.determine_status({"setup_ok": True, "runs": [run] * 3}, {"setup_ok": True, "runs": [run] * 3})
+    assert s["status"] == "FAILS_SETUP" and s["reason"] == "fixed_import_or_collection_error"
+
+
 def test_marked_block_and_values():
     from execution.audit import steps
     m = "@@abc@@"
@@ -184,6 +197,24 @@ def test_marked_block_and_values():
     assert steps.marked_value(out, m, "HEAD") == "deadbeef"
     assert steps.marked_block(out, m, "FREEZE") == "a==1\nb==2"
     assert steps.marked_block(out, m, "MISSING") is None
+
+
+def test_sample_allocation_min_one_then_largest_remainder():
+    from execution.audit.sample import allocate
+    sizes = {"pandas": 169, "scrapy": 40, "luigi": 33, "matplotlib": 30, "black": 23, "fastapi": 16,
+             "sanic": 5, "PySnooper": 3}
+    a = allocate(sizes, 20)
+    assert sum(a.values()) == 20 and all(v >= 1 for v in a.values())
+    assert a == {"pandas": 7, "scrapy": 3, "luigi": 2, "matplotlib": 2, "black": 2, "fastapi": 2,
+                 "sanic": 1, "PySnooper": 1}
+
+
+def test_create_env_r1_only_for_py38():
+    from execution.audit import steps
+    s_r1, _ = steps.create_env("pandas", 60, "r1")
+    s_un, _ = steps.create_env("pandas", 60, "unmodified")
+    assert "3.8.*) EXTRA=setuptools==68.0.0" in s_r1 and 'B="base_r1_$H"' in s_r1
+    assert "setuptools==68.0.0" not in s_un and 'B="base_unmodified_$H"' in s_un
 
 
 def test_launcher_of():

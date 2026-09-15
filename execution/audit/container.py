@@ -25,8 +25,8 @@ def docker(*args: str, input_bytes: bytes | None = None, timeout: float | None =
                           timeout=timeout, check=check)
 
 
-def container_name(project: str) -> str:
-    return f"fda-audit-{project.lower()}"
+def container_name(project: str, worker: int = 0) -> str:
+    return f"fda-audit-{project.lower()}-w{worker}"
 
 
 def exec_script(name: str, script: str, timeout_s: float) -> ExecResult:
@@ -52,8 +52,8 @@ def inspect(name: str) -> dict | None:
     return json.loads(p.stdout)[0]
 
 
-def ensure_container(project: str, image_tag: str) -> dict:
-    name = container_name(project)
+def ensure_container(project: str, image_tag: str, worker: int = 0) -> dict:
+    name = container_name(project, worker)
     info = inspect(name)
     image_id = json.loads(docker("image", "inspect", image_tag, check=True).stdout)[0]["Id"]
     if info is not None:
@@ -66,9 +66,9 @@ def ensure_container(project: str, image_tag: str) -> dict:
         return {"name": name, "image_id": image_id, "created": False}
     # --init: PID 1 reaps orphaned children (sleep infinity does not, leaving zombies).
     args = ["run", "-d", "--init", "--name", name, "--label", "org.fda.audit=1",
-            "--label", f"org.fda.project={project}"]
+            "--label", f"org.fda.project={project}", "--label", f"org.fda.worker={worker}"]
     for vol, mount in config.VOLUMES.items():
-        args += ["-v", f"{vol}:{mount}"]
+        args += ["-v", f"{vol.format(worker=worker)}:{mount}"]
     # Only environment variables that change *where* things are stored, never test behaviour.
     args += ["-e", "CCACHE_DIR=/root/.ccache", "-e", f"PIP_SRC={config.PIP_SRC}",
              image_tag, "sleep", "infinity"]
@@ -76,5 +76,7 @@ def ensure_container(project: str, image_tag: str) -> dict:
     return {"name": name, "image_id": image_id, "created": True}
 
 
-def remove_container(project: str) -> None:
-    docker("rm", "-f", container_name(project), timeout=600)
+def remove_containers(project: str) -> None:
+    ids = docker("ps", "-aq", "--filter", "label=org.fda.audit=1", "--filter", f"label=org.fda.project={project}").stdout.split()
+    if ids:
+        docker("rm", "-f", *[i.decode() for i in ids], timeout=900)

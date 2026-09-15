@@ -18,8 +18,11 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
-from collections import Counter
+import uuid
+from collections import Counter, deque
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from . import config, container, parse, records, status, steps
@@ -116,10 +119,13 @@ def audit_version(ctx: dict, bug: dict, version: int, log: Logger) -> dict:
         return v
 
     # environment
-    r, m = step("env", steps.create_env(project, config.ENV_TIMEOUT_S), config.ENV_TIMEOUT_S)
+    r, m = step("env", steps.create_env(project, config.ENV_TIMEOUT_S, ctx["procedure"]), config.ENV_TIMEOUT_S)
     v["env_name"] = steps.marked_value(r.output, m, "ENV")
     v["python_declared"] = steps.marked_value(r.output, m, "PYV")
     v["base_env_created"] = steps.marked_value(r.output, m, "BASE_CREATE") is not None
+    v["base_env_tries"] = sum(1 for x in steps.marked(r.output, m) if x.startswith("BASE_TRY "))
+    v["base_env_extra_specs"] = steps.marked_value(r.output, m, "BASE_EXTRA") or ""
+    v["setuptools_version"] = steps.marked_value(r.output, m, "SETUPTOOLS")
     if steps.marked_value(r.output, m, "ENV_OK") is None:
         tail = [ln for ln in r.output.splitlines() if ln.strip() and not ln.startswith(m)][-3:]
         v["setup_error"] = f"env: python={v['python_declared']} rc={r.rc} {' | '.join(tail)[:300]}"
@@ -272,20 +278,24 @@ def determinism(ctx: dict, bug: dict, log: Logger) -> dict:
 
 # --------------------------------------------------------------------------- one bug
 
-def audit_bug(project: str, bug_id: int, cinfo: dict, img: dict, paths: Paths, git: dict) -> dict:
+def audit_bug(project: str, bug_id: int, cinfo: dict, img: dict, paths: Paths, git: dict,
+              procedure: str, workers: int, reaudit_reason: str | None = None) -> dict:
     t0 = time.monotonic()
     bug = read_bug(project, bug_id)
     bug_log_root = paths.logs / project / str(bug_id)
-    attempt = 1 + sum(1 for p in bug_log_root.glob("attempt*") if p.is_dir()) if bug_log_root.exists() else 1
+    with records.LOCK:
+        attempt = 1 + sum(1 for p in bug_log_root.glob("attempt*") if p.is_dir()) if bug_log_root.exists() else 1
+        (bug_log_root / f"attempt{attempt}").mkdir(parents=True, exist_ok=False)
     log = Logger(bug_log_root / f"attempt{attempt}")
-    (bug_log_root / f"attempt{attempt}").mkdir(parents=True, exist_ok=False)
     info = bug["info"]
     patch_files = [f for f in bug["patch"].files if not parse.is_test_path(f)] or bug["patch"].files
-    ctx = {"project": project, "bug_id": bug_id, "container": cinfo["name"],
+    ctx = {"project": project, "bug_id": bug_id, "container": cinfo["name"], "procedure": procedure,
            "package": config.PACKAGE_MAP.get(project), "patch_files": patch_files}
 
     rec = {"schema_version": config.SCHEMA_VERSION, "harness_version": config.HARNESS_VERSION,
            "harness_git_sha": git["sha"], "harness_git_dirty": git["dirty"], "rules_version": config.RULES_VERSION,
+           "procedure": procedure, "parallel_workers": workers, "worker_container": cinfo["name"],
+           "reaudit_reason": reaudit_reason,
            "attempt": attempt, "project": project, "bug_id": bug_id,
            "python_version_declared": info.get("python_version"),
            "buggy_commit_declared": info.get("buggy_commit_id"), "fixed_commit_declared": info.get("fixed_commit_id"),
@@ -334,7 +344,23 @@ def audit_bug(project: str, bug_id: int, cinfo: dict, img: dict, paths: Paths, g
 
 # --------------------------------------------------------------------------- project loop
 
+def project_elapsed(paths: Paths, project: str) -> float:
+    """Elapsed wall clock across sessions: per session, the largest `session_elapsed` checkpoint.
+    Sessions without checkpoints (harness v1.0.0) contribute the sum of their bug_attempt seconds."""
+    per_session: dict[str, float] = {}
+    legacy = 0.0
+    for e in records.read_jsonl(paths.events):
+        if e.get("project") != project:
+            continue
+        if "session_id" in e and "session_elapsed" in e:
+            per_session[e["session_id"]] = max(per_session.get(e["session_id"], 0.0), e["session_elapsed"])
+        elif e.get("event") in ("bug_attempt", "project_prep"):
+            legacy += e.get("seconds", 0)
+    return sum(per_session.values()) + legacy
+
+
 def project_seconds(paths: Paths, project: str) -> float:
+    """Compute seconds (sum over bug attempts and preparation, all workers)."""
     return sum(e.get("seconds", 0) for e in records.read_jsonl(paths.events)
                if e.get("project") == project and e.get("event") in ("bug_attempt", "project_prep"))
 
@@ -354,9 +380,21 @@ def commit_project(project: str, paths: Paths, note: str) -> None:
     subprocess.run(["git", "-C", str(config.REPO_ROOT), "commit", "-m", msg], check=False)
 
 
+def selection(args) -> dict[str, list[int]]:
+    if args.sample_file:
+        sample = json.loads(Path(args.sample_file).read_text(encoding="utf-8"))
+        sel = {p: sorted(ids) for p, ids in sample["bugs"].items()}
+        return {p: sel[p] for p in (args.projects or sorted(sel)) if p in sel}
+    if not args.projects:
+        raise SystemExit("--projects is required unless --sample-file is given")
+    return {p: (args.bugs or bug_ids(p)) for p in args.projects}
+
+
 def run(args) -> int:
-    out = Path(args.out).resolve() if args.out else config.AUDIT_DIR
-    official = out == config.AUDIT_DIR.resolve()
+    procedure = args.procedure
+    default_out = config.AUDIT_DIR if procedure == "r1" else config.UNMODIFIED_SAMPLE_DIR
+    out = Path(args.out).resolve() if args.out else default_out
+    official = out.resolve() in (config.AUDIT_DIR.resolve(), config.UNMODIFIED_SAMPLE_DIR.resolve())
     git = harness_git()
     if official and git["dirty"] and not args.allow_dirty:
         print("Refusing to write official audit records with uncommitted harness changes. Commit first.")
@@ -364,78 +402,124 @@ def run(args) -> int:
     paths = Paths(out)
     img = ensure_image()
     manifest_dir = paths.logs / "_image" / img["tag"].split(":")[1]
-    done = records.latest_by_bug(records.read_jsonl(paths.results))
+    sel = selection(args)
+    full_projects = not args.bugs and not args.sample_file
 
-    for project in args.projects:
+    for project, ids in sel.items():
         if is_parked(paths, project) and not args.include_parked:
             print(f"[{project}] parked (TIMEOUT_PROJECT); skipping until all other projects are complete.")
             continue
-        ids = args.bugs or bug_ids(project)
+        done = records.latest_by_bug(records.read_jsonl(paths.results))
         todo = [b for b in ids if (project, b) not in done]
         print(f"[{project}] {len(ids) - len(todo)} already audited, {len(todo)} to go", flush=True)
         if not todo:
             continue
-        cinfo = container.ensure_container(project, img["tag"])
-        records.append_jsonl(paths.events, {"event": "project_session_start", "project": project, "at": records.utcnow(),
-                                            "harness_version": config.HARNESS_VERSION, "harness_git_sha": git["sha"],
-                                            "image_tag": img["tag"], "container_created": cinfo["created"]})
-        if not manifest_dir.exists():
-            s, m = steps.env_snapshot(project)
-            r = container.exec_script(cinfo["name"], s, 120)
-            manifest_dir.mkdir(parents=True, exist_ok=True)
-            for key in ("DPKG", "CONDA_BASE"):
-                records.write_once(manifest_dir / f"{key.lower()}.txt", steps.marked_block(r.output, m, key) or "")
-            records.write_once(manifest_dir / "image.json", json.dumps({**img, "conda": steps.marked_value(r.output, m, "CONDA_VERSION"),
-                                                                        "ccache": steps.marked_value(r.output, m, "CCACHE")}, indent=2), compress=False)
-        t = time.monotonic()
-        s, m = steps.clone_project(project, config.CLONE_TIMEOUT_S)
-        r = container.exec_script(cinfo["name"], s, config.CLONE_TIMEOUT_S)
-        records.append_jsonl(paths.events, {"event": "project_prep", "project": project, "at": records.utcnow(),
-                                            "seconds": round(time.monotonic() - t, 1),
-                                            "clone_head": steps.marked_value(r.output, m, "CLONE_HEAD")})
-        if steps.marked_value(r.output, m, "CLONE_HEAD") is None:
-            print(f"[{project}] clone failed:\n{r.output[-2000:]}")
-            return 3
+        n_workers = max(1, min(args.workers or config.WORKERS.get(project, config.DEFAULT_WORKERS), len(todo)))
+        session_id = uuid.uuid4().hex
+        t_session = time.monotonic()
+        prior_elapsed = project_elapsed(paths, project)
 
-        parked = False
-        for b in todo:
-            spent = project_seconds(paths, project)
-            if spent >= config.PROJECT_WALLCLOCK_GUARD_S and not args.include_parked:
-                records.append_jsonl(paths.events, {"event": "project_parked", "project": project, "at": records.utcnow(),
-                                                    "status": "TIMEOUT_PROJECT", "seconds_spent": round(spent),
-                                                    "guard_seconds": config.PROJECT_WALLCLOCK_GUARD_S})
-                print(f"[{project}] TIMEOUT_PROJECT after {spent/3600:.2f} h; parking.", flush=True)
-                parked = True
-                break
-            free = host_free_gb()
-            if free < config.MIN_HOST_FREE_GB:
-                print(f"[{project}] host free disk {free:.1f} GB < {config.MIN_HOST_FREE_GB} GB; stopping safely.")
-                return 4
+        def event(ev: dict) -> None:
+            records.append_jsonl(paths.events, {**ev, "project": project, "at": records.utcnow(), "session_id": session_id,
+                                                "session_elapsed": round(time.monotonic() - t_session, 1)})
+
+        cinfos = [container.ensure_container(project, img["tag"], k) for k in range(n_workers)]
+        event({"event": "project_session_start", "procedure": procedure, "harness_version": config.HARNESS_VERSION,
+               "harness_git_sha": git["sha"], "image_tag": img["tag"], "workers": n_workers,
+               "prior_elapsed_seconds": round(prior_elapsed, 1)})
+        with records.LOCK:
+            if not manifest_dir.exists():
+                s, m = steps.env_snapshot(project)
+                r = container.exec_script(cinfos[0]["name"], s, 120)
+                manifest_dir.mkdir(parents=True, exist_ok=True)
+                for key in ("DPKG", "CONDA_BASE"):
+                    records.write_once(manifest_dir / f"{key.lower()}.txt", steps.marked_block(r.output, m, key) or "")
+                records.write_once(manifest_dir / "image.json", json.dumps(
+                    {**img, "conda": steps.marked_value(r.output, m, "CONDA_VERSION"),
+                     "ccache": steps.marked_value(r.output, m, "CCACHE")}, indent=2), compress=False)
+
+        def prep(ci: dict) -> str | None:
+            t = time.monotonic()
+            s, m = steps.clone_project(project, config.CLONE_TIMEOUT_S)
+            r = container.exec_script(ci["name"], s, config.CLONE_TIMEOUT_S)
+            head = steps.marked_value(r.output, m, "CLONE_HEAD")
+            event({"event": "project_prep", "worker_container": ci["name"], "seconds": round(time.monotonic() - t, 1),
+                   "clone_head": head})
+            if head is None:
+                print(f"[{project}] clone failed in {ci['name']}:\n{r.output[-2000:]}", flush=True)
+            return head
+
+        with ThreadPoolExecutor(max_workers=n_workers) as ex:
+            if not all(ex.map(prep, cinfos)):
+                return 3
+
+        queue = deque(todo)
+        state = {"parked": False, "disk_stop": False}
+        qlock = threading.Lock()
+
+        def one(ci: dict, b: int, workers: int, reaudit: str | None) -> None:
             t = time.monotonic()
             try:
-                rec = audit_bug(project, b, cinfo, img, paths, git)
+                rec = audit_bug(project, b, ci, img, paths, git, procedure, workers, reaudit)
                 recorded = True
-                print(f"[{project} #{b}] {rec['status']} ({rec['status_reason']}) {rec['wall_clock_seconds']:.0f}s "
-                      f"{rec['error'][:120]}", flush=True)
-            except Exception as e:  # harness failure: no record, bug will be retried with the next attempt
+                print(f"[{project} #{b} {ci['name'][-2:]}] {rec['status']} ({rec['status_reason']}) "
+                      f"{rec['wall_clock_seconds']:.0f}s {rec['error'][:110]}", flush=True)
+            except Exception as e:  # harness failure: no record; the bug is retried with the next attempt
                 recorded = False
                 print(f"[{project} #{b}] HARNESS ERROR (not recorded, will retry): {e!r}", flush=True)
                 if args.stop_on_error:
                     raise
-            records.append_jsonl(paths.events, {"event": "bug_attempt", "project": project, "bug_id": b,
-                                                "at": records.utcnow(), "seconds": round(time.monotonic() - t, 1),
-                                                "recorded": recorded})
-        remaining = [x for x in (args.bugs or bug_ids(project))
-                     if (project, x) not in records.latest_by_bug(records.read_jsonl(paths.results))]
-        complete = not remaining
-        if (complete or parked) and not args.bugs:
-            records.append_jsonl(paths.events, {"event": "project_end", "project": project, "at": records.utcnow(),
-                                                "complete": complete, "parked": parked,
-                                                "seconds_total": round(project_seconds(paths, project), 1)})
+            event({"event": "bug_attempt", "bug_id": b, "worker_container": ci["name"], "workers": workers,
+                   "reaudit_reason": reaudit, "seconds": round(time.monotonic() - t, 1), "recorded": recorded})
+
+        def worker(ci: dict) -> None:
+            while True:
+                with qlock:
+                    if state["parked"] or state["disk_stop"] or not queue:
+                        return
+                    elapsed = prior_elapsed + time.monotonic() - t_session
+                    if elapsed >= config.PROJECT_WALLCLOCK_GUARD_S and not args.include_parked:
+                        state["parked"] = True
+                        event({"event": "project_parked", "status": "TIMEOUT_PROJECT",
+                               "elapsed_seconds": round(elapsed), "guard_seconds": config.PROJECT_WALLCLOCK_GUARD_S,
+                               "not_started": len(queue)})
+                        print(f"[{project}] TIMEOUT_PROJECT after {elapsed/3600:.2f} h elapsed; "
+                              f"finishing in-flight bugs, {len(queue)} not started.", flush=True)
+                        return
+                    free = host_free_gb()
+                    if free < config.MIN_HOST_FREE_GB:
+                        state["disk_stop"] = True
+                        print(f"[{project}] host free disk {free:.1f} GB < {config.MIN_HOST_FREE_GB} GB; stopping safely.",
+                              flush=True)
+                        return
+                    b = queue.popleft()
+                one(ci, b, n_workers, None)
+
+        with ThreadPoolExecutor(max_workers=n_workers) as ex:
+            list(ex.map(worker, cinfos))
+        if state["disk_stop"]:
+            return 4
+
+        # Amendment 004: serial confirmation of FLAKY/TIMEOUT outcomes observed under parallel load.
+        latest = records.latest_by_bug(records.read_jsonl(paths.results))
+        confirm = [b for b in ids if (project, b) in latest and latest[(project, b)]["status"] in ("FLAKY", "TIMEOUT")
+                   and latest[(project, b)].get("parallel_workers", 1) > 1]
+        for b in confirm:
+            print(f"[{project} #{b}] serial confirmation of {latest[(project, b)]['status']}", flush=True)
+            one(cinfos[0], b, 1, "serial_confirmation")
+
+        latest = records.latest_by_bug(records.read_jsonl(paths.results))
+        complete = all((project, x) in latest for x in ids)
+        if complete or state["parked"]:
+            if full_projects:
+                event({"event": "project_end", "complete": complete, "parked": state["parked"],
+                       "elapsed_seconds": round(project_elapsed(paths, project), 1),
+                       "compute_seconds": round(project_seconds(paths, project), 1)})
             if not args.keep_container:
-                container.remove_container(project)
+                container.remove_containers(project)
             if args.commit and official:
-                commit_project(project, paths, " (TIMEOUT_PROJECT, parked)" if parked else "")
+                commit_project(project, paths, (" (TIMEOUT_PROJECT, parked)" if state["parked"] else "")
+                               + ("" if procedure == "r1" else " [unmodified-procedure sample]"))
     return 0
 
 
@@ -450,8 +534,11 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="audit")
     sub = ap.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run")
-    r.add_argument("--projects", nargs="+", required=True)
+    r.add_argument("--projects", nargs="+")
     r.add_argument("--bugs", nargs="+", type=int)
+    r.add_argument("--sample-file", help="JSON with {'bugs': {project: [ids]}} (e.g. unmodified_sample/SAMPLE.json)")
+    r.add_argument("--procedure", choices=config.PROCEDURES, default="r1")
+    r.add_argument("--workers", type=int, help="override per-project worker count")
     r.add_argument("--out", help="results directory (default: benchmark/audit). Use .audit-cache/smoke for smoke tests.")
     r.add_argument("--commit", action="store_true", help="git commit benchmark/audit after each completed project")
     r.add_argument("--include-parked", action="store_true")

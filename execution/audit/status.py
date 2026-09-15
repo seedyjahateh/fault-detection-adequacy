@@ -31,6 +31,10 @@ def command_verdict(line: str, rc: int, seconds: float, timeout_s: int, output: 
                 res["verdict"], res["note"] = "not_run", "all tests skipped"
             else:
                 res["verdict"] = "pass"
+        elif rc in (4, 5) and failures:
+            # e.g. the test module failed to import during collection, so the node id is then "not found":
+            # the junit collection error is the real outcome (luigi/2 smoke, 2026-09-15).
+            res["verdict"], res["note"] = "fail", f"pytest rc={rc} after collection errors"
         elif rc in (4, 5):
             res["verdict"], res["note"] = "not_run", {4: "pytest usage error (test not found?)",
                                                       5: "no tests collected"}[rc]

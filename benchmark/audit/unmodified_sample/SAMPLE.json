@@ -1,0 +1,71 @@
+{
+  "amendment": "004",
+  "seed": 20260915,
+  "size": 20,
+  "population": "bugs declaring Python 3.8.x",
+  "strata_sizes": {
+    "PySnooper": 3,
+    "black": 23,
+    "fastapi": 16,
+    "luigi": 33,
+    "matplotlib": 30,
+    "pandas": 169,
+    "sanic": 5,
+    "scrapy": 40,
+    "spacy": 1
+  },
+  "allocation": {
+    "PySnooper": 1,
+    "black": 2,
+    "fastapi": 2,
+    "luigi": 2,
+    "matplotlib": 2,
+    "pandas": 7,
+    "sanic": 1,
+    "scrapy": 2,
+    "spacy": 1
+  },
+  "method": "min 1 per project, remainder proportional (largest remainder); random.Random(seed).sample over sorted bug ids per project, projects in sorted order",
+  "drawn_at": "2026-09-15T16:04:00+00:00",
+  "fork_sha": "316b95e2353ecda832bad9b42f86fa7c2fcec8ac",
+  "bugs": {
+    "PySnooper": [
+      3
+    ],
+    "black": [
+      19,
+      23
+    ],
+    "fastapi": [
+      4,
+      12
+    ],
+    "luigi": [
+      7,
+      14
+    ],
+    "matplotlib": [
+      11,
+      29
+    ],
+    "pandas": [
+      5,
+      34,
+      41,
+      76,
+      104,
+      115,
+      144
+    ],
+    "sanic": [
+      1
+    ],
+    "scrapy": [
+      4,
+      8
+    ],
+    "spacy": [
+      4
+    ]
+  }
+}

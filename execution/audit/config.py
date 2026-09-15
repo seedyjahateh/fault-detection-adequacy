@@ -4,7 +4,7 @@ bump HARNESS_VERSION and commit before running."""
 import os
 from pathlib import Path
 
-HARNESS_VERSION = "1.0.0"
+HARNESS_VERSION = "1.1.0"
 SCHEMA_VERSION = 1
 RULES_VERSION = "exclusion-rules-v1"
 
@@ -26,7 +26,10 @@ IMAGE_REPO = "fda-bugsinpy-audit"
 # Shared caches (rebuildable, not raw artifacts). Conda envs and project clones live in
 # the per-project container and are removed with it.
 VOLUMES = {
-    "fda-audit-conda-pkgs": "/opt/conda/pkgs",
+    # conda's package cache is not safe for concurrent writers ([Errno 17] File exists when two
+    # workers extract the same package), so it is per worker: "{worker}" is substituted.
+    "fda-audit-conda-pkgs-w{worker}": "/opt/conda/pkgs",
+    # pip's cache and ccache use atomic writes and are safe to share between workers.
     "fda-audit-pip-cache": "/root/.cache/pip",
     "fda-audit-ccache": "/root/.ccache",
 }
@@ -46,8 +49,18 @@ ENV_TIMEOUT_S = 45 * 60
 COMPILE_TIMEOUT_S = 120 * 60
 PROBE_TIMEOUT_S = 10 * 60
 
-PROJECT_WALLCLOCK_GUARD_S = 6 * 3600   # TIMEOUT_PROJECT guard
+PROJECT_WALLCLOCK_GUARD_S = 6 * 3600   # TIMEOUT_PROJECT guard (elapsed wall clock, all sessions)
 MIN_HOST_FREE_GB = 4.0
+
+# Amendment 004. "r1" = primary procedure; "unmodified" = the fork's procedure exactly as written.
+PROCEDURES = ("r1", "unmodified")
+R1_BASE_EXTRA_SPECS = {"3.8": "setuptools==68.0.0"}   # python major.minor -> extra conda spec
+
+# Amendment 004: concurrent workers per project (each has its own container and clone).
+DEFAULT_WORKERS = 3
+WORKERS = {"keras": 2, "pandas": 2}   # memory-heavy (TensorFlow tests / C compiles)
+UNMODIFIED_SAMPLE_DIR = AUDIT_DIR / "unmodified_sample"
+UNMODIFIED_SAMPLE_SEED = 20260915
 
 # Top-level importable package per project, used to verify which copy of the code runs.
 PACKAGE_MAP = {

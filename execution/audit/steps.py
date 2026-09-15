@@ -104,28 +104,43 @@ echo "$M STATUS_BEGIN"; git status --porcelain --untracked-files=all | grep -v '
 """)
 
 
-def create_env(project: str, timeout_s: int) -> tuple[str, str]:
+def create_env(project: str, timeout_s: int, procedure: str) -> tuple[str, str]:
     # Mirrors bugsinpy-testall's env naming exactly (python version + requirements hash), but builds
     # a pristine base once and gives every (bug, version) a fresh clone of it (isolation).
+    # Procedure r1 (Amendment 004) adds an extra conda spec for some Python versions; base envs are
+    # named per procedure so the two procedures never share a base.
+    cases = "\n".join(f'  {mm}.*) EXTRA={shlex.quote(spec)} ;;' for mm, spec in config.R1_BASE_EXTRA_SPECS.items())
+    extra = f"""case "$PYV" in
+{cases}
+  *) EXTRA="" ;;
+esac""" if procedure == "r1" else 'EXTRA=""'
     return _script(project, f"""
 cd "$W/$P"
 sed -i -e '/^\\s*#.*$/d' -e '/^\\s*$/d' bugsinpy_requirements.txt
 dos2unix bugsinpy_requirements.txt >/dev/null 2>&1
 PYV=$(grep -o "3\\..\\.." bugsinpy_bug.info)
 H=$(cat <(echo $PYV) bugsinpy_requirements.txt | md5sum | cut -d' ' -f 1)
+{extra}
+B="base_{procedure}_$H"
 echo "$M PYV $PYV"
 echo "$M ENV $H"
-if ! conda env list | awk '{{print $1}}' | grep -qx "base_$H"; then
+echo "$M BASE_EXTRA $EXTRA"
+if ! conda env list | awk '{{print $1}}' | grep -qx "$B"; then
   echo "$M BASE_CREATE"
-  if ! timeout -k 30 {timeout_s} conda create -n "base_$H" -y python=$PYV pytest; then
-    conda env remove -n "base_$H" >/dev/null 2>&1
-    echo "$M BASE_FAIL"; exit 3
-  fi
+  ok=""
+  for try in 1 2; do  # one retry for transient download/extraction errors; both attempts are logged
+    echo "$M BASE_TRY $try"
+    if timeout -k 30 {timeout_s} conda create -n "$B" -y python=$PYV pytest $EXTRA; then ok=1; break; fi
+    conda env remove -n "$B" >/dev/null 2>&1
+    conda clean -y --tarballs >/dev/null 2>&1
+  done
+  [ -n "$ok" ] || {{ echo "$M BASE_FAIL"; exit 3; }}
 fi
 conda env remove -n "$H" >/dev/null 2>&1
-if ! timeout -k 30 {timeout_s} conda create -n "$H" --clone "base_$H" --offline -y >/dev/null; then
+if ! timeout -k 30 {timeout_s} conda create -n "$H" --clone "$B" --offline -y >/dev/null; then
   echo "$M CLONE_FAIL"; exit 4
 fi
+echo "$M SETUPTOOLS $(conda list -n "$H" '^setuptools$' 2>/dev/null | awk '/^setuptools/ {{print $2}}')"
 echo "$M ENV_OK"
 """)
 

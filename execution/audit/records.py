@@ -7,7 +7,11 @@ import datetime as dt
 import gzip
 import json
 import os
+import threading
 from pathlib import Path
+
+# Serialises appends from concurrent worker threads (one harness process per run).
+LOCK = threading.RLock()
 
 
 def utcnow() -> str:
@@ -17,7 +21,7 @@ def utcnow() -> str:
 def append_jsonl(path: Path, record: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(record, sort_keys=True, ensure_ascii=False) + "\n"
-    with open(path, "a", encoding="utf-8", newline="\n") as fh:
+    with LOCK, open(path, "a", encoding="utf-8", newline="\n") as fh:
         fh.write(line)
         fh.flush()
         os.fsync(fh.fileno())
