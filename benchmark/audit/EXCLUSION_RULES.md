@@ -56,6 +56,7 @@ Each failing test is assigned an exception type and a category:
 | `COLLECTION_ERROR` | `SyntaxError`/`IndentationError`, or a pytest collection failure without a parseable type |
 | `UNRESOLVED_CRASH` | `AttributeError`/`NameError` without an extractable name, or a signature-style `TypeError` without an extractable function |
 | `RUNTIME_EXCEPTION` | Every other exception, incl. `AttributeError`/`TypeError` on names the patch does **not** introduce, and non-signature `TypeError`s (e.g. `unsupported operand`) |
+| `RUNNER_ERROR` | The test runner itself did not run tests. Either pytest exited rc 1–3 **without writing a JUnit report** (a startup/config/plugin crash; pytest writes JUnit even after collection errors), or it wrote a JUnit report with no failures despite a non-zero rc; or unittest exited non-zero without any `FAIL:`/`ERROR:` block. Never counted as a test outcome. |
 | `PROCESS_CRASH` | Test process killed by SIGSEGV/SIGABRT/SIGBUS/SIGFPE |
 | `TIMEOUT` | Command exceeded its timeout |
 | `UNKNOWN` | No exception type could be parsed |
@@ -81,7 +82,8 @@ documented exception".
    - the fixed checkout shows no changes;
    - conda env creation fails;
    - compile times out (120 min) or does not complete;
-   - **or** the fixed version fails consistently with only `IMPORT_ERROR`/`COLLECTION_ERROR` failures.
+   - every run of either version contains a `RUNNER_ERROR` (reason `<version>_runner_error`);
+   - **or** the fixed version fails consistently with only `IMPORT_ERROR`/`COLLECTION_ERROR`/`RUNNER_ERROR` failures.
 
    If buggy setup fails, the fixed version is not attempted.
 2. **`FLAKY`**: run verdicts are not identical across the 3 buggy runs, or across the 3 fixed runs.

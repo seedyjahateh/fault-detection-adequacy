@@ -156,6 +156,27 @@ def test_command_verdict_pytest_timeout_and_not_found():
     assert v["verdict"] == "fail" and [f["category"] for f in v["failures"]] == ["ASSERTION", "API_SURFACE_CRASH", "IMPORT_ERROR"]
 
 
+PYTEST_CONFIG_CRASH = """Traceback (most recent call last):
+  File "/opt/conda/envs/x/lib/python3.8/site-packages/setuptools/_vendor/typeguard/_pytest_plugin.py", line 22, in add_ini_option
+    parser.addini(
+  File "/opt/conda/envs/x/lib/python3.8/site-packages/_pytest/config/argparsing.py", line 177, in addini
+    assert type in (None, "pathlist", "args", "linelist", "bool")
+AssertionError
+"""
+
+
+def test_pytest_startup_crash_is_runner_error_not_assertion():
+    """Regression (pandas/1 smoke, 2026-09-15): a pytest config crash must never count as a test failure."""
+    p = parse.parse_patch(PATCH)
+    v = status.command_verdict("pytest t.py::x", 1, 3.0, 1200, PYTEST_CONFIG_CRASH, None, p, "pkg")
+    assert v["verdict"] == "fail"
+    assert [f["category"] for f in v["failures"]] == ["RUNNER_ERROR"]
+    run = {"verdict": "fail", "commands": [v]}
+    fixed_ok = {"setup_ok": True, "runs": [_run("pass")] * 3}
+    s = status.determine_status({"setup_ok": True, "runs": [run] * 3}, fixed_ok)
+    assert s["status"] == "FAILS_SETUP" and s["reason"] == "buggy_runner_error"
+
+
 def test_marked_block_and_values():
     from execution.audit import steps
     m = "@@abc@@"

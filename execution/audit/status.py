@@ -34,13 +34,19 @@ def command_verdict(line: str, rc: int, seconds: float, timeout_s: int, output: 
         elif rc in (4, 5):
             res["verdict"], res["note"] = "not_run", {4: "pytest usage error (test not found?)",
                                                       5: "no tests collected"}[rc]
+        elif rc in (1, 2, 3) and junit_xml is None:
+            # pytest writes junit at session end, even after collection errors. No junit means pytest
+            # itself crashed during startup/config (e.g. a broken plugin): never a test outcome.
+            res["verdict"] = "fail"
+            failures = [TestFailure("<command>", "runner", None, _last_exc_line(output) or f"pytest rc={rc}",
+                                    "RUNNER_ERROR", "pytest exited without writing junit (startup/config crash)")]
+            res["note"] = f"pytest rc={rc} without junit report"
         elif rc in (1, 2, 3):
             res["verdict"] = "fail"
             if not failures:
-                exc = parse._exc_from_text("\n".join(
-                    "E   " + ln for ln in output.splitlines() if "Error" in ln or "Exception" in ln))
-                failures = [TestFailure("<command>", "error", exc, _last_exc_line(output))]
-                res["note"] = f"pytest rc={rc} without junit failures"
+                failures = [TestFailure("<command>", "runner", None, _last_exc_line(output) or f"pytest rc={rc}",
+                                        "RUNNER_ERROR", "junit report contains no failures despite non-zero rc")]
+                res["note"] = f"pytest rc={rc} with empty junit"
         elif rc in SIGNAL_RCS:
             res["verdict"] = "fail"
             failures = [TestFailure("<command>", "signal", None, SIGNAL_RCS[rc], "PROCESS_CRASH", SIGNAL_RCS[rc])]
@@ -62,7 +68,8 @@ def command_verdict(line: str, rc: int, seconds: float, timeout_s: int, output: 
         else:
             res["verdict"] = "fail"
             if not failures:
-                failures = [TestFailure("<command>", "error", None, _last_exc_line(output))]
+                failures = [TestFailure("<command>", "runner", None, _last_exc_line(output) or f"unittest rc={rc}",
+                                        "RUNNER_ERROR", "unittest exited non-zero without FAIL/ERROR blocks")]
                 res["note"] = f"unittest rc={rc} without parsed FAIL/ERROR blocks"
     else:
         res["verdict"] = "pass" if rc == 0 else "fail"
@@ -123,11 +130,19 @@ def determine_status(buggy: dict, fixed: dict) -> dict:
     bv = [r["verdict"] for r in buggy["runs"]]
     fv = [r["verdict"] for r in fixed["runs"]]
 
+    # The test runner itself could not start on either version: an environment failure, not a test result.
+    for name, v in (("buggy", buggy), ("fixed", fixed)):
+        cats_by_run = [{f["category"] for c in r["commands"] for f in c["failures"]} for r in v["runs"]]
+        if v["runs"] and all(cats and "RUNNER_ERROR" in cats for cats in cats_by_run):
+            first = next(f for c in v["runs"][0]["commands"] for f in c["failures"] if f["category"] == "RUNNER_ERROR")
+            return {"status": "FAILS_SETUP", "reason": f"{name}_runner_error",
+                    "error": f"{name}: test runner crashed: {first['message'][:200]}", "strict": strict}
+
     # Fixed version cannot import its own test module / dependencies: an environment failure.
     for r in fixed["runs"]:
         if r["verdict"] == "fail":
             cats = {f["category"] for c in r["commands"] for f in c["failures"]}
-            if cats and cats <= {"IMPORT_ERROR", "COLLECTION_ERROR"}:
+            if cats and cats <= {"IMPORT_ERROR", "COLLECTION_ERROR", "RUNNER_ERROR"}:
                 first = next(f for c in r["commands"] for f in c["failures"])
                 if len(set(fv)) == 1:
                     return {"status": "FAILS_SETUP", "reason": "fixed_import_or_collection_error",

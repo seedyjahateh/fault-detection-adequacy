@@ -234,16 +234,18 @@ if ! python -m coverage --version >/dev/null 2>&1; then
 fi
 echo "$M COVERAGE_VERSION $(python -m coverage --version 2>&1 | head -1)"
 rm -rf .coverage .coverage.* /tmp/fda_cov.json
+# coverage.py does not follow pytest-xdist workers (e.g. keras addopts -n); serialise this auxiliary run only.
+nox=""; python -c "import xdist" >/dev/null 2>&1 && nox="-n 0" && echo "$M COV_XDIST_DISABLED"
 while IFS= read -r line || [ -n "$line" ]; do
   line=$(printf '%s' "$line" | sed -e 's/\\r//g')
   [ -z "$(printf '%s' "$line" | tr -d '[:space:]')" ] && continue
   set -- $line
   # Rewrite the launcher only; keep the arguments exactly as run_test.sh gives them.
   if [ "$1" = "pytest" ] || [ "$1" = "py.test" ]; then
-    shift; launcher="$(command -v pytest || command -v py.test)"; cmd="python -m coverage run -p --include={inc} $launcher $* -p no:cacheprovider"
+    shift; launcher="$(command -v pytest || command -v py.test)"; cmd="python -m coverage run -p --include={inc} $launcher $* -p no:cacheprovider $nox"
   elif [ "${{2:-}}" = "-m" ]; then
     py="$1"; mod="$3"; shift 3; cmd="$py -m coverage run -p --include={inc} -m $mod $*"
-    case "$mod" in pytest) cmd="$cmd -p no:cacheprovider" ;; esac
+    case "$mod" in pytest) cmd="$cmd -p no:cacheprovider $nox" ;; esac
   else
     echo "$M COV_UNSUPPORTED $line"; continue
   fi
