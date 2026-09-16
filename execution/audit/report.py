@@ -73,10 +73,18 @@ def build(audit_dir: Path, projects: list[str], title: str) -> str:
          f"- Rules: `{config.RULES_VERSION}` (see EXCLUSION_RULES.md)", ""]
 
     # ---- headline
-    n_eligible = sum(1 for r in recs if r["status"] == "REPRODUCES" and elig.get((r["project"], r["bug_id"]), {}).get("eligible") is True)
-    n_classified = sum(1 for r in recs if r["status"] == "REPRODUCES" and (r["project"], r["bug_id"]) in elig)
-    pending = "" if n_classified == c["REPRODUCES"] else \
-        f" (eligibility classified for {n_classified}/{c['REPRODUCES']} REPRODUCES bugs — PENDING)"
+    repro = [r for r in recs if r["status"] == "REPRODUCES"]
+
+    def current(r):  # eligibility record for the bug's latest audit attempt, if any
+        e = elig.get((r["project"], r["bug_id"]))
+        return e if e and e["audit_attempt"] == r["attempt"] else None
+
+    n_eligible = sum(1 for r in repro if (current(r) or {}).get("eligible") is True)
+    n_eligible_assert = sum(1 for r in repro if (current(r) or {}).get("eligible_assertion_only") is True)
+    n_localhost = sum(1 for r in repro if (current(r) or {}).get("localhost_sensitivity_would_be_eligible"))
+    n_decided = sum(1 for r in repro if current(r) and current(r)["eligible"] is not None)
+    pending = "" if n_decided == len(repro) else \
+        f" (eligibility decided for {n_decided}/{len(repro)} REPRODUCES bugs — PENDING)"
     L += ["## Headline", "",
           f"| Quantity | Count |", "|---|---:|",
           f"| Bugs in scope | {n_total} |",
@@ -84,10 +92,13 @@ def build(audit_dir: Path, projects: list[str], title: str) -> str:
           f"| Broad reproduction (REPRODUCES + REPRODUCES_CRASH_ONLY) | {broad} ({pct(broad, len(recs))} of audited) |",
           f"| REPRODUCES (strict failure type) | {c['REPRODUCES']} ({pct(c['REPRODUCES'], len(recs))} of audited) |",
           f"| REPRODUCES_CRASH_ONLY | {c['REPRODUCES_CRASH_ONLY']} ({pct(c['REPRODUCES_CRASH_ONLY'], broad)} of broad) |",
-          f"| **REPRODUCES and ELIGIBLE** | **{n_eligible}**{pending} |", ""]
-    if n_classified < c["REPRODUCES"] or len(recs) < n_total:
+          f"| **REPRODUCES and ELIGIBLE** | **{n_eligible}**{pending} |",
+          f"| ELIGIBLE, assertion-only sensitivity (§A.4) | {n_eligible_assert} |",
+          f"| Would additionally be ELIGIBLE if localhost sockets were allowed (Amendment 005 5c) | {n_localhost} |", ""]
+    if n_decided < len(repro) or len(recs) < n_total or parked & set(projects):
         L += [f"**§6.6 power floor (n ≥ 120): NOT YET DETERMINABLE.** {len(recs)}/{n_total} bugs audited, "
-              f"eligibility classified for {n_classified}/{c['REPRODUCES']} REPRODUCES bugs.", ""]
+              f"eligibility decided for {n_decided}/{len(repro)} REPRODUCES bugs"
+              f"{', parked projects: ' + ', '.join(sorted(parked & set(projects))) if parked & set(projects) else ''}.", ""]
     else:
         met = n_eligible >= 120
         L += [f"**§6.6 power floor (n ≥ 120): {'MET' if met else 'NOT MET'}** — {n_eligible} eligible bugs.", ""]
@@ -214,20 +225,24 @@ def build(audit_dir: Path, projects: list[str], title: str) -> str:
           "| Result | Bugs |", "|---|---:|"] + [f"| {k} | {n} |" for k, n in dc.most_common()] + [""]
 
     # ---- eligibility
-    L += ["## Eligibility (§4.1 criteria 2–4)", ""]
-    if not elig:
-        L += ["Not yet classified. The post-hoc classifier runs only after EXCLUSION_RULES.md is final.", ""]
+    L += ["## Eligibility (§4.1 criteria 2–4, EXCLUSION_RULES.md §B–§E) over REPRODUCES", ""]
+    classified = [current(r) for r in repro if current(r)]
+    if not classified:
+        L += ["Not yet classified (`python -m execution.audit.classify run`).", ""]
     else:
-        crit = Counter()
-        for r in det:
-            e = elig.get((r["project"], r["bug_id"]))
-            if e:
-                for k, ok in e.get("criteria", {}).items():
-                    crit[(k, ok)] += 1
-        L += ["| Criterion | Pass | Fail |", "|---|---:|---:|"]
-        for k in sorted({k for k, _ in crit}):
-            L.append(f"| {k} | {crit[(k, True)]} | {crit[(k, False)]} |")
-        L.append("")
+        order = ["patch_size", "reachable", "hermetic", "deterministic"]
+        crit = Counter((k, e["criteria"].get(k)) for e in classified for k in order)
+        L += [f"Classified: {len(classified)}/{len(repro)}.", "",
+              "| Criterion | Pass | Fail | Pending manual review |", "|---|---:|---:|---:|"]
+        L += [f"| {k} | {crit[(k, True)]} | {crit[(k, False)]} | {crit[(k, None)]} |" for k in order]
+        flags = Counter(f for e in classified for f in e["hermeticity"]["flags"])
+        excl = Counter(k.split(":", 1)[1] for e in classified for k, v in e["manual_decisions_applied"].items()
+                       if k.startswith("C.2:") and v["decision"] == "exclude")
+        if flags:
+            L += ["", "| Hermeticity flag (§C.2) | Bugs flagged | Confirmed exclusions |", "|---|---:|---:|"]
+            L += [f"| {f} | {n} | {excl[f]} |" for f, n in flags.most_common()]
+        n_pending = sum(len(e["pending_manual"]) for e in classified if e["eligible"] is None)
+        L += ["", f"Manual decisions still needed (bugs not already ineligible): {n_pending}.", ""]
     return "\n".join(L) + "\n"
 
 

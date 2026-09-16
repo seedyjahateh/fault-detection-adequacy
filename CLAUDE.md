@@ -83,8 +83,45 @@ co-primary (§4.2).
 
   If the same bug has several records, the latest attempt wins.
 - Record debug-minutes and compute wall-clock per project.
-- Pilot: tqdm or thefuck (small), luigi or sanic (mid), pandas or keras (hard).
-  Get PI go-ahead before the remaining projects.
+- Pilot: tqdm (small), luigi (mid), keras (hard), plus pandas as a probe
+  time-boxed by the 6 h guard. Get PI go-ahead before the remaining 13 projects.
+- **Amendment 004** (read it before touching environments or runs):
+  - **R1** (primary procedure): base conda envs for Python 3.8.x add
+    `setuptools==68.0.0`. Unpinned setuptools 75.1.0 vendors typeguard, which
+    crashes pytest before any test runs; this affects 320/501 bugs.
+  - **Unmodified-procedure sample:** a stratified 20-bug sample runs the fork's
+    procedure unchanged, recorded in `benchmark/audit/unmodified_sample/`.
+  - **Parallel workers:** each worker has its own container, clone and conda
+    package cache. FLAKY/TIMEOUT outcomes seen under parallel load are
+    re-audited once serially.
+- **Amendment 005:** the approved operationalisations in `EXCLUSION_RULES.md` v1
+  (frozen). Notably: runtime exceptions raised by the faulty code count as
+  strict; `tempfile`/`ensure_clean` temp dirs and reads of repo-tracked files are
+  allowed; localhost sockets are excluded (with a sensitivity figure).
+- `project_runs.jsonl` (session events, debug minutes), `eligibility.jsonl`
+  (classifier output) and `unmodified_sample/audit_results.jsonl` are data files:
+  append-only.
+
+## Harness (execution/audit)
+
+Python 3.11.14 via uv (`uv sync`); stdlib-only at runtime. Tests: `uv run pytest -q`.
+
+```
+uv run python -m execution.audit.audit run --projects tqdm luigi keras pandas --commit   # resumable
+uv run python -m execution.audit.audit run --procedure unmodified --sample-file benchmark/audit/unmodified_sample/SAMPLE.json
+uv run python -m execution.audit.audit log-debug --project P --minutes N --note "..."
+uv run python -m execution.audit.classify run | pending | decide ...   # §B–§E eligibility
+uv run python -m execution.audit.report [--pilot]                      # derived report
+uv run python -m execution.audit.freeze                                # benchmark/BENCHMARK_FROZEN.json
+```
+
+- Smoke tests must use `--out .audit-cache/<name>` (scratch, gitignored),
+  never `benchmark/audit`.
+- Official runs refuse to start with uncommitted harness changes.
+- The fork must be checked out at `316b95e` in `../BugsInPy` (or set `BUGSINPY_FORK_DIR`).
+- **Where to run:** the Windows laptop cannot run parallel workers (memory
+  pressure grew the page file; C: fell to 2.3 GB free on 2026-09-15). The audit
+  runs on a Google Cloud VM: see `docs/CLOUD_RUNBOOK.md` and `execution/cloud/`.
 
 ## Repository layout (§9)
 
@@ -151,3 +188,11 @@ analysis environment. Subject bugs run their own pinned interpreters (mostly
 
 - Host: Windows 11, PowerShell 5.1. Subject execution happens in Linux Docker
   containers. BugsInPy tooling is bash, so run it inside containers/WSL, not natively.
+- PowerShell 5.1 pitfalls that have caused real errors here:
+  - A single matching object has an empty/1 `.Count`, which gives wrong counts and non-waiting wait loops.
+    Use `@(...)` or `Select-String -Quiet`.
+  - Piping strings to `docker exec -i` adds a BOM, and `Set-Content` adds a BOM or changes encoding.
+    Use `docker cp` or `[IO.File]::WriteAllText` with UTF-8 without BOM.
+  - Inline bash in PowerShell double quotes gets mangled: write a script file instead.
+- Git on this host has `core.autocrlf=true` system-wide. `.gitattributes` forces LF, and the fork must be
+  cloned with `-c core.autocrlf=false`.
